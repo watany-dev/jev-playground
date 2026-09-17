@@ -6,6 +6,7 @@ JevをCodexのhooksへ接続するAuto Modeの実装と検証用リポジトリ�
 - [hookとJevのログ確認手順](jev-auto/README.md#5-フックとjevのログを確認するb)
 - [設計](jev-auto/docs/DESIGN.md)
 - [Gateway接続の検証レポート](jev-auto/docs/REPORT.md)
+- [仕様をJevに詰めさせてADRを残すスキル](.claude/skills/gril-jev/SKILL.md)（[ADR置き場](docs/adr/README.md)）
 - [47都道府県あてフォーム (Python/uv)](jev-form/README.md) — Jevの確率分布をそのまま見るサンプル
 - [記事: Jevの確率分布をそのまま見る](jev-form/blog/guessing-prefectures-with-jev.md)
 
