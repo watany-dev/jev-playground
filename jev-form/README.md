@@ -5,7 +5,8 @@
 
 Jev は文章を生成せず、共有状態に対して型付きの確率だけを返す評価モデルである。
 このサンプルは1リクエストで choice / score / boolean の3種類を同時に投げ、
-返ってきた分布をそのまま画面へ出す。設計の意図は [docs/DESIGN.md](docs/DESIGN.md) を参照。
+返ってきた分布をそのまま画面へ出す。設計の意図は [docs/DESIGN.md](docs/DESIGN.md)、
+実装の解説は [blog/guessing-prefectures-with-jev.md](blog/guessing-prefectures-with-jev.md) を参照。
 
 ## 1. 動かす
 
