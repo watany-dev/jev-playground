@@ -1,0 +1,26 @@
+{
+  "name": "jev-auto",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "description": "Bun-based Jev guard and bounded Auto Mode for Codex",
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun build src/cli.ts scripts/run-jev.mjs --target=bun --outdir=.check",
+    "test:jev": "bun run scripts/run-jev.mjs"
+  },
+  "dependencies": {
+    "ai": "7.0.105",
+    "@ai-sdk/gateway": "4.0.85"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
+  }
+}

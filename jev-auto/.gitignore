@@ -1,0 +1,7 @@
+node_modules/
+.check/
+dist/
+.env
+.env.*
+session-state/
+audit*.jsonl
