@@ -52,12 +52,17 @@ export async function main(args = Bun.argv.slice(2)) {
   const runtime = mkdtempSync(join(tmpdir(), 'jev-auto-'));
   chmodSync(runtime, 0o700);
   if (within(root, runtime)) throw new UsageError('The runtime/audit directory must be outside the workspace. Use a dedicated project directory.');
+  for (const name of ['audit.jsonl', 'judgments.jsonl']) {
+    writeFileSync(join(runtime, name), '', { flag: 'wx', mode: 0o600 });
+  }
   const socket = join(runtime, 'broker.sock');
   const rootDir = resolve(dirname(cli), '..');
   const watched = ['cli.ts', 'hook.ts', 'broker.ts', 'config.ts', 'protocol.ts', 'policy.ts', 'engine.ts', 'evaluator.ts'].map(file => join(dirname(cli), file));
   const hashes = watched.map(path => hash(readFileSync(path, 'utf8')));
   const integrity = () => readFileSync(configPath, 'utf8') === content && watched.every((p, i) => hash(readFileSync(p, 'utf8')) === hashes[i]);
-  const engine = new Engine({ root, protectedRoot: rootDir, mode, evaluate: createEvaluator(key), auditDir: runtime, integrity });
+  const engine = new Engine({
+    root, protectedRoot: rootDir, mode, evaluate: createEvaluator(key), auditDir: runtime, integrity,
+  });
   const server = startBroker(socket, engine);
   console.error(`jev-auto ${mode}; audit: ${runtime}\nSandbox enabled. Ensure /hooks lists every jev-auto hook as trusted. Ctrl-C stops the run.`);
   const child = Bun.spawn([codex, ...codexArgs(root, prompt)], {

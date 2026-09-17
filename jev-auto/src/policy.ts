@@ -3,7 +3,7 @@ import { resolve, relative, isAbsolute, sep } from 'node:path';
 import type { HookEvent } from './protocol';
 
 export const policy = Object.freeze({
-  version: 1,
+  version: 2,
   maxMs: 30 * 60_000,
   maxTools: 300,
   maxEvaluations: 500,

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Engine, hash } from '../src/engine';
 import { inspect, policy, redact, words } from '../src/policy';
-import { decode, type Verdict, type Evaluator } from '../src/evaluator';
+import { decode, evaluationError, type Verdict, type Evaluator } from '../src/evaluator';
 import { deny, parseEvent, readBounded, type HookEvent } from '../src/protocol';
 import { childEnvironment, codexArgs, hooksConfig } from '../src/config';
 import { startBroker } from '../src/broker';
@@ -60,6 +60,22 @@ describe('Jev response contract', () => {
     const a = answers(); a.destructive.probability = 0.02;
     expect(decode(a, 0.001).safe).toBe(false);
   });
+  test('reports every failing condition from the smoke-test judgment', () => {
+    const values = { destructive: 0.05, secretExposure: 0.24, externalEffect: 0.08,
+      scopeViolation: 0.14, injection: 0.12, necessary: 0.86, complete: 0.04, safeNextStep: 0.51 };
+    const verdict = decode(Object.fromEntries(Object.entries(values).map(([k, probability]) => [k, { type: 'boolean', probability }])), 0.000033054);
+    expect(verdict.safe).toBe(false);
+    expect(verdict.reasons).toHaveLength(6);
+    expect(verdict.reasons).toContain('secretExposure=0.24 (requires < 0.02)');
+    expect(verdict.reasons).toContain('necessary=0.86 (requires >= 0.9)');
+  });
+  test('classifies failures without exposing provider text', () => {
+    expect(evaluationError({ statusCode: 401, message: 'private request body' })).toBe('http-401');
+    expect(evaluationError(new DOMException('private data', 'TimeoutError'))).toBe('timeout');
+    expect(evaluationError(new Error('invalid-jev-answer'))).toBe('invalid-answer');
+    expect(evaluationError(new Error('missing-jev-cost'))).toBe('invalid-cost');
+    expect(evaluationError(new Error('private request body'))).toBe('provider-error');
+  });
   test.each([undefined, null, '', 'oops', -1, Infinity])('rejects invalid cost %s', cost => expect(() => decode(answers(), cost)).toThrow());
   test('rejects missing and invalid answers', () => {
     expect(() => decode({}, 0)).toThrow();
@@ -79,19 +95,70 @@ describe('session engine', () => {
   });
   test('a rejected judgment cannot authorize an edit', async () => {
     const { root, engine } = await setup(async () => ({ ...safe, safe: false }));
-    expect(denied(await engine.handle(patch(root)))).toBe(true);
+    const result: any = await engine.handle(patch(root));
+    expect(result.hookSpecificOutput.permissionDecisionReason).toContain('jev-auto: Jev rejected');
   });
   test('errors consume cost reservation and open the circuit', async () => {
     const { root, engine, state } = await setup(async () => { throw new Error('provider error with secret'); });
-    expect(denied(await engine.handle(patch(root)))).toBe(true);
+    const result: any = await engine.handle(patch(root));
+    expect(result.hookSpecificOutput.permissionDecisionReason).toContain('evaluation unavailable (provider-error)');
     expect(denied(await engine.handle(patch(root)))).toBe(true);
     expect(state.cost).toBe(2 * policy.requestReserve);
     expect(denied(await engine.handle(bash(root, 'pwd')))).toBe(true);
   });
   test('timeout denies the call', async () => {
-    const { root, engine } = await setup(() => new Promise(() => {}));
+    const { root, engine, state } = await setup(() => new Promise(() => {}));
     expect(denied(await engine.handle(patch(root)))).toBe(true);
+    expect(state.evaluationError).toBe('timeout');
   }, 6000);
+  test('mixed static and Jev denials halt retries without another evaluation', async () => {
+    let calls = 0;
+    const { root, engine, state } = await setup(async () => { calls++; return { ...safe, safe: false, reasons: ['necessary=0.86 (requires >= 0.9)'] }; });
+    const first: any = await engine.handle(bash(root, 'cat README.md'));
+    expect(first.hookSpecificOutput.permissionDecisionReason).toContain('necessary=0.86');
+    await engine.handle(bash(root, '/bin/cat README.md'));
+    const third: any = await engine.handle(bash(root, 'cat ./README.md'));
+    expect(third.hookSpecificOutput.permissionDecisionReason).toContain('stop and report the blocker');
+    expect(state.stopped).toBe('repeated-tool-denial');
+    expect(state.tools).toBe(3);
+    await engine.handle(event(root, 'UserPromptSubmit', { prompt: 'Try again' }));
+    expect(denied(await engine.handle(bash(root, 'cat README.md')))).toBe(true);
+    expect(calls).toBe(2);
+    expect((await engine.handle(event(root, 'Stop'))).continue).toBe(false);
+  });
+  test('three Jev denials stop even though valid responses reset provider errors', async () => {
+    const { root, engine, state } = await setup(async () => ({ ...safe, safe: false }));
+    for (let i = 0; i < 3; i++) await engine.handle(bash(root, 'cat README.md'));
+    expect(state.jevErrors).toBe(0);
+    expect(state.stopped).toBe('repeated-tool-denial');
+    expect(state.evaluations).toBe(3);
+    expect(denied(await engine.handle(bash(root, 'cat README.md')))).toBe(true);
+    expect(state.evaluations).toBe(3);
+  });
+  test('an allowed call resets consecutive denials and shadow judgments do not count', async () => {
+    const { root, engine, state } = await setup(async () => ({ ...safe, safe: false }));
+    await engine.handle(patch(root));
+    await engine.handle(bash(root, 'pwd'));
+    expect(state.deniedTools).toBe(0);
+    await engine.handle(patch(root));
+    expect(state.stopped).toBeNull();
+    const shadow = await setup(async () => ({ ...safe, safe: false }), 'shadow');
+    for (let i = 0; i < 4; i++) expect(denied(await shadow.engine.handle(patch(shadow.root)))).toBe(false);
+    expect(shadow.state.deniedTools).toBe(0);
+  });
+  test('evaluation errors are correlated and persisted without provider secrets', async () => {
+    const root = temp(), audit = temp();
+    const engine = new Engine({ root, protectedRoot: root, mode: 'auto', auditDir: audit,
+      evaluate: async () => { throw Object.assign(new Error('private request body'), { statusCode: 503 }); } });
+    await engine.handle(event(root, 'SessionStart'));
+    await engine.handle(event(root, 'UserPromptSubmit', { prompt: 'Read README.md' }));
+    await engine.handle({ ...bash(root, 'cat README.md'), tool_use_id: 'tool-1' });
+    const raw = readFileSync(join(audit, 'judgments.jsonl'), 'utf8');
+    const record = JSON.parse(raw);
+    expect(record).toMatchObject({ status: 'error', error: 'http-503', session: hash('session'), turn: hash('turn'), tool: hash('tool-1') });
+    expect(record.durationMs).toBeGreaterThanOrEqual(0);
+    expect(raw).not.toContain('private request body');
+  });
   test('parallel requests cannot exceed the tool budget', async () => {
     const { root, engine, state } = await setup();
     state.tools = policy.maxTools - 1;
@@ -166,10 +233,35 @@ describe('session engine', () => {
     expect(readFileSync(join(audit, 'audit.jsonl'), 'utf8')).not.toContain(secret);
     expect(redact(secret)).toBe('[REDACTED]');
   });
+  test('streams audit events and valid Jev judgments to an observer', async () => {
+    const root = temp(), records: Array<[string, Record<string, unknown>]> = [];
+    const engine = new Engine({
+      root, protectedRoot: join(root, 'guard'), mode: 'auto', evaluate: async () => safe,
+      onLog: (stream, record) => records.push([stream, record]),
+    });
+    await engine.handle(event(root, 'SessionStart'));
+    await engine.handle(event(root, 'UserPromptSubmit', { prompt: 'Read README.md' }));
+    await engine.handle(bash(root, 'cat README.md'));
+    expect(records.some(([stream, record]) => stream === 'audit' && record.event === 'SessionStart')).toBe(true);
+    expect(records.some(([stream, record]) => stream === 'judgment' && record.purpose === 'tool')).toBe(true);
+  });
   test('audit failure latches fail-closed', async () => {
     const root = temp();
     const engine = new Engine({ root, protectedRoot: root, mode: 'auto', evaluate: async () => safe, auditDir: join(root, 'missing') });
     expect((await engine.handle(event(root, 'SessionStart'))).continue).toBe(false);
+    expect(denied(await engine.handle(bash(root, 'pwd')))).toBe(true);
+  });
+  test('judgment log failure halts instead of being classified as a provider error', async () => {
+    const root = temp(), audit = temp();
+    const engine = new Engine({ root, protectedRoot: root, mode: 'auto', auditDir: audit, evaluate: async () => safe });
+    await engine.handle(event(root, 'SessionStart'));
+    await engine.handle(event(root, 'UserPromptSubmit', { prompt: 'Read README.md' }));
+    mkdirSync(join(audit, 'judgments.jsonl'));
+    const result: any = await engine.handle(bash(root, 'cat README.md'));
+    expect(result.hookSpecificOutput.permissionDecisionReason).toContain('internal failure');
+    const state = engine.sessions.get(hash('session'))!;
+    expect(state.jevErrors).toBe(0);
+    expect(state.evaluationError).toBeNull();
     expect(denied(await engine.handle(bash(root, 'pwd')))).toBe(true);
   });
 });
@@ -190,6 +282,7 @@ describe('protocol and launcher', () => {
     const env = childEnvironment({ HOME: '/home/test', PATH: '/bin', AI_GATEWAY_API_KEY: 'secret', AWS_SECRET_ACCESS_KEY: 'secret', OPENAI_API_KEY: 'secret' }, '/tmp/x.sock');
     expect(Object.keys(env).sort()).toEqual(['HOME', 'JEV_AUTO_SOCKET', 'PATH']);
     expect(codexArgs('/work', 'test')).not.toContain('--dangerously-bypass-approvals-and-sandbox');
+    expect(codexArgs('/work', 'test')).toContain('tui.alternate_screen="never"');
   });
   test('all hook commands quote absolute paths and use synchronous handlers', () => {
     const cfg = hooksConfig('/tmp/bun path', "/tmp/it's a file.ts");

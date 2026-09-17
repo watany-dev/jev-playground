@@ -25,7 +25,8 @@ export function codexArgs(root: string, prompt: string): string[] {
     '-c', 'features.computer_use=false',
     '-c', 'features.multi_agent=false',
     '-c', 'features.multi_agent_v2=false',
-    '-c', 'shell_environment_policy.inherit="none"',
+    '-c', 'tui.alternate_screen="never"',
+    '-c', 'shell_environment_policy.inherit="all"',
     '-c', 'shell_environment_policy.include_only=["PATH","HOME","TMPDIR","LANG","TERM"]',
     ...(prompt ? [prompt] : []),
   ];

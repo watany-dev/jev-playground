@@ -3,7 +3,7 @@ import { appendFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { context, deny, type HookEvent, type Output } from './protocol';
 import { inspect, hasSecret, redact, policy, words } from './policy';
-import type { Evaluator, Verdict } from './evaluator';
+import { evaluationError, type Evaluator, type Verdict } from './evaluator';
 import { shellQuote } from './config';
 
 export const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -12,10 +12,12 @@ export type Session = {
   continuations: number; chain: number; jevErrors: number; stopped: string | null;
   changedPaths: string[]; changedLines: number; errors: Record<string, number>;
   recent: string[]; observed: number; lastContinuedAt: number; continuationPrompt: string;
+  deniedTools: number; evaluationError: string | null;
 };
 export type EngineOptions = {
   root: string; protectedRoot: string; evaluate: Evaluator; mode: 'shadow' | 'auto';
   auditDir?: string; now?: () => number; integrity?: () => boolean;
+  onLog?: (stream: 'audit' | 'judgment', record: Record<string, unknown>) => void;
 };
 
 export class Engine {
@@ -42,15 +44,16 @@ export class Engine {
       const output = await this.decide(e);
       const id = hash(e.session_id);
       const s = this.sessions.get(id);
+      const record = {
+        at: this.now(), session: id, event: e.hook_event_name,
+        turn: hash(String(e.turn_id ?? '')), tool: hash(String(e.tool_use_id ?? '')),
+        input: hash(JSON.stringify(e)), decision: output,
+        policy: policy.version, mode: this.options.mode,
+        counts: s && { tools: s.tools, evaluations: s.evaluations, cost: s.cost, continuations: s.continuations, deniedTools: s.deniedTools },
+      };
       if (this.options.auditDir) {
         // No raw goal, command, output, secret or provider error in the audit log.
-        appendFileSync(join(this.options.auditDir, 'audit.jsonl'), JSON.stringify({
-          at: this.now(), session: id, event: e.hook_event_name,
-          turn: hash(String(e.turn_id ?? '')), tool: hash(String(e.tool_use_id ?? '')),
-          input: hash(JSON.stringify(e)), decision: output,
-          policy: policy.version, mode: this.options.mode,
-          counts: s && { tools: s.tools, evaluations: s.evaluations, cost: s.cost, continuations: s.continuations },
-        }) + '\n', { mode: 0o600 });
+        appendFileSync(join(this.options.auditDir, 'audit.jsonl'), JSON.stringify(record) + '\n', { mode: 0o600 });
         if (s) {
           // Snapshot contains only redacted context; never used as authority on restart.
           const path = join(this.options.auditDir, `${id}.json`);
@@ -58,6 +61,7 @@ export class Engine {
           renameSync(`${path}.tmp`, path);
         }
       }
+      this.emit('audit', record);
       return output;
     } catch {
       this.fatal = true;
@@ -76,29 +80,53 @@ export class Engine {
     return null;
   }
 
-  private async judge(s: Session, data: Record<string, unknown>, purpose: 'tool' | 'stop'): Promise<Verdict | null> {
+  private async judge(s: Session, data: Record<string, unknown>, purpose: 'tool' | 'stop', e: HookEvent): Promise<Verdict | null> {
     s.evaluations++;
     s.cost += policy.requestReserve;
+    s.evaluationError = null;
+    const started = this.now();
+    const identity = { session: hash(e.session_id), turn: hash(String(e.turn_id ?? '')), tool: hash(String(e.tool_use_id ?? '')),
+      input: hash(JSON.stringify(data)), purpose };
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let v: Verdict;
     try {
-      const v = await Promise.race([
+      v = await Promise.race([
         this.options.evaluate(data, purpose),
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), policy.timeoutMs); }),
       ]);
       if (s.stopped) return null;
       if (!Number.isFinite(v.cost) || v.cost < 0) throw new Error('invalid-cost');
-      s.cost += v.cost - policy.requestReserve;
-      s.jevErrors = 0;
-      if (this.options.auditDir) appendFileSync(join(this.options.auditDir, 'judgments.jsonl'), JSON.stringify({
-        at: this.now(), input: hash(JSON.stringify(data)), purpose, probabilities: v.probabilities, cost: v.cost,
-      }) + '\n', { mode: 0o600 });
-      if (s.cost >= policy.maxCost) { s.stopped = 'cost-budget'; return null; }
-      return v;
-    } catch {
+    } catch (error) {
       // Keep the reservation: a failed/timeout request may still have been billed.
       s.jevErrors++;
+      s.evaluationError = evaluationError(error);
+      const record = { ...identity, at: this.now(), durationMs: this.now() - started, status: 'error', error: s.evaluationError };
+      if (this.options.auditDir) appendFileSync(join(this.options.auditDir, 'judgments.jsonl'), JSON.stringify(record) + '\n', { mode: 0o600 });
+      this.emit('judgment', record);
       return null;
     } finally { if (timer) clearTimeout(timer); }
+    s.cost += v.cost - policy.requestReserve;
+    s.jevErrors = 0;
+    const record = {
+      ...identity, at: this.now(), durationMs: this.now() - started, status: 'ok',
+      safe: v.safe, reasons: v.reasons ?? [], probabilities: v.probabilities, cost: v.cost,
+    };
+    // Audit failures must halt the engine, not masquerade as provider failures.
+    if (this.options.auditDir) appendFileSync(join(this.options.auditDir, 'judgments.jsonl'), JSON.stringify(record) + '\n', { mode: 0o600 });
+    this.emit('judgment', record);
+    if (s.cost >= policy.maxCost) { s.stopped = 'cost-budget'; return null; }
+    return v;
+  }
+
+  private rejectTool(s: Session, reason: string): Output {
+    s.deniedTools++;
+    if (s.deniedTools >= policy.maxFailures) s.stopped = 'repeated-tool-denial';
+    return deny('PreToolUse', `jev-auto: ${reason}${s.stopped ? `; ${s.stopped}; stop and report the blocker` : '; do not retry the same rejected action'}`);
+  }
+
+  private emit(stream: 'audit' | 'judgment', record: Record<string, unknown>) {
+    try { this.options.onLog?.(stream, record); }
+    catch { /* Terminal output is observational; the on-disk audit remains authoritative. */ }
   }
 
   private async decide(e: HookEvent): Promise<Output> {
@@ -108,7 +136,7 @@ export class Engine {
     if (name === 'SessionStart' && !s) {
       s = { started: this.now(), goal: '', tools: 0, evaluations: 0, cost: 0, continuations: 0, chain: 0,
         jevErrors: 0, stopped: null, changedPaths: [], changedLines: 0, errors: {}, recent: [], observed: 0,
-        lastContinuedAt: 0, continuationPrompt: '' };
+        lastContinuedAt: 0, continuationPrompt: '', deniedTools: 0, evaluationError: null };
       this.sessions.set(id, s);
     }
     if (!s) return deny(name, 'jev-auto: no active session; start with jev-auto run');
@@ -138,9 +166,9 @@ export class Engine {
     }
     if (!s.goal) return deny(name, 'jev-auto: no user goal captured');
     if (name === 'PreToolUse') {
-      const result = inspect(e, this.options.root, this.options.protectedRoot);
-      if (result.kind === 'deny') return deny(name, `jev-auto: ${result.rule}`);
       s.tools++;
+      const result = inspect(e, this.options.root, this.options.protectedRoot);
+      if (result.kind === 'deny') return this.rejectTool(s, result.rule);
       if (result.paths) {
         const next = [...new Set([...s.changedPaths, ...result.paths])];
         if (next.length > policy.maxChangedFiles || s.changedLines + (result.lines ?? 0) > policy.maxChangedLines) {
@@ -151,8 +179,11 @@ export class Engine {
       let output: Output = {};
       if (result.kind === 'review') {
         const verdict = await this.judge(s, { goal: s.goal, workspace: this.options.root,
-          tool: e.tool_name, input: e.tool_input, recent: s.recent, rule: result.rule }, 'tool');
-        if (this.options.mode === 'auto' && !verdict?.safe) return deny(name, 'jev-auto: Jev rejected or evaluation unavailable');
+          tool: e.tool_name, input: e.tool_input, recent: s.recent, rule: result.rule }, 'tool', e);
+        if (this.options.mode === 'auto') {
+          if (!verdict) return this.rejectTool(s, `evaluation unavailable (${s.evaluationError ?? s.stopped ?? 'cancelled'})`);
+          if (!verdict.safe) return this.rejectTool(s, `Jev rejected: ${verdict.reasons?.join('; ') || 'unsafe verdict'}`);
+        }
         if (this.options.mode === 'shadow') output = { systemMessage: `jev-auto shadow: ${verdict?.safe ? 'would allow' : 'would deny'}` };
       }
       if (result.paths) {
@@ -166,6 +197,7 @@ export class Engine {
         output.hookSpecificOutput = { hookEventName: name, permissionDecision: 'allow',
           updatedInput: { ...e.tool_input, command, login: false, tty: false } };
       }
+      s.deniedTools = 0;
       return output;
     }
     if (name === 'PostToolUse') {
@@ -196,8 +228,8 @@ export class Engine {
       if (hasSecret(e.last_assistant_message ?? '')) { s.stopped = 'secret-in-summary'; return deny(name, 'jev-auto: sensitive summary'); }
       const verdict = await this.judge(s, { goal: s.goal, recent: s.recent,
         lastAssistantMessage: redact(e.last_assistant_message ?? '').slice(0, 4000),
-        remainingContinuations: policy.maxContinuations - s.continuations }, 'stop');
-      if (!verdict) return deny(name, 'jev-auto: completion evaluation unavailable');
+        remainingContinuations: policy.maxContinuations - s.continuations }, 'stop', e);
+      if (!verdict) return deny(name, `jev-auto: completion evaluation unavailable (${s.evaluationError ?? s.stopped ?? 'cancelled'})`);
       if (verdict.complete || !verdict.canContinue) return {};
       s.continuations++; s.chain++; s.lastContinuedAt = s.observed;
       // Fixed text, never promote model/tool output into a new user instruction.

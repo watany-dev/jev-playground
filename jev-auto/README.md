@@ -10,7 +10,7 @@ Linux/macOSのBun 1.4.2以降、Codex CLI 0.154.0向け。Windowsは未対応。
 Codex実セッションでの無人運用前に、下記のshadow modeで自分の作業に対する判定を確認する。
 
 追試は「[セットアップと検証](#セットアップと検証)」→「[動作確認の手順](#動作確認の手順)」の順に進める。
-これまでの確認結果は **53テスト成功、型検査・ビルド成功**。
+今回の環境では **60テスト成功、1件はUnixソケット作成がEPERMで失敗、型検査・ビルド成功**。
 フック別プロセスとUnixソケットの結合テストを含むが、Jev応答はモック。
 実Gatewayを使ったAuto Mode＋Codex実セッションは未検証なので、以下の追試で確認する。
 
@@ -53,7 +53,7 @@ bun test
 ```
 
 このワークスペースでは `cd /workspaces/jev-playground/jev-auto` でも移動できる。
-テスト終了時の目印は `53 pass` / `0 fail`。
+全テストを実行できる環境での成功の目印は `61 pass` / `0 fail`。
 `bun test` はローカルのUnixソケットを作るため、`EPERM ... listen` が出たらソケット作成を許可した環境で再実行する。
 ここまでのコマンドは有料APIを呼ばない。
 
@@ -64,7 +64,9 @@ bun test
 
 ## 動作確認の手順
 
-ターミナルAで起動し、ターミナルBでログを読む。Aは引き続き `jev-auto/` をカレントディレクトリにする。
+ターミナルAにはCodexの表示とフックの拒否理由が表示される。
+監査JSONはTUI描画との競合を避けるためファイルにのみ出力する。逐次確認する場合は別ターミナルBを使う。
+Aは引き続き `jev-auto/` をカレントディレクトリにする。
 以下の手順は実Gatewayを使うため、Jev判定とCodexの利用料金が発生する。
 
 ### 1. 追試用リポジトリを作る（A）
@@ -118,22 +120,25 @@ bun run start run "$JEV_TARGET" --shadow 'Bashツールで cat README.md を単�
 jev-auto shadow; audit: /tmp/jev-auto-XXXXXX
 ```
 
-この `audit:` のパスを控える。追試用リポジトリ `JEV_TARGET` とは別のディレクトリ。
+この `audit:` のパスには、監査記録が調査用JSONLとして保存される。
+追試用リポジトリ `JEV_TARGET` とは別のディレクトリ。
 shadowはJev判断をログに残し、Jevの拒否は実行を止める判断に使わない。
 静的な禁止ルールは適用し、権限要求は通常の承認へ渡す。自動継続はしない。
 
-### 5. フックとJevのログを確認する（B）
+### 5. フックとJevのログを確認する（A）
 
-起動時に実際に表示されたパスで、次の例を置き換える。
+ターミナルBで起動時に表示されたログ保存先を指定し、次を実行する。
 
 ```bash
 JEV_LOG_DIR=/tmp/jev-auto-XXXXXX
-tail -F "$JEV_LOG_DIR/audit.jsonl" "$JEV_LOG_DIR/judgments.jsonl"
+tail -f "$JEV_LOG_DIR/audit.jsonl" "$JEV_LOG_DIR/judgments.jsonl"
 ```
 
-`judgments.jsonl` は最初の有効なJev回答を受信してから作られる。
-それまでは `tail` がファイルなしと表示しても、`-F` で待ち続ける。
-表示監視だけを終了するにはBでCtrl-Cを押す。Aの実行には影響しない。
+`audit.jsonl` はフックイベント、`judgments.jsonl` はJev評価の成功・失敗を表す。
+`status: "ok"` は有効な回答の受信（許可とは限らない）、`status: "error"` は評価失敗。
+成功時は `safe` と閾値違反の `reasons`、失敗時は固定分類の `error` を記録する。
+両方に `durationMs` とイベントに対応する `session` / `turn` / `tool` のハッシュを付ける。
+`audit.jsonl` と `judgments.jsonl` は起動時に作成されるため、必要なら終了後に `audit:` のパスから読み返せる。
 
 | 観測するもの | 意味・成功の目印 |
 |---|---|
@@ -151,7 +156,7 @@ tail -F "$JEV_LOG_DIR/audit.jsonl" "$JEV_LOG_DIR/judgments.jsonl"
 
 ```bash
 jq -c '{event, mode, decision, counts}' "$JEV_LOG_DIR/audit.jsonl"
-jq -c '{purpose, probabilities, cost}' "$JEV_LOG_DIR/judgments.jsonl"
+jq -c '{purpose, status, safe, reasons, error, durationMs, probabilities, cost}' "$JEV_LOG_DIR/judgments.jsonl"
 ```
 
 ### 6. Autoで編集を確認する（A）
@@ -162,7 +167,7 @@ shadowのCodexを終了し、同じAで起動する。
 bun run start run "$JEV_TARGET" 'README.mdをcatで読み、apply_patchで末尾に「Auto Mode smoke test passed.」という1行を追加してください。その後cat README.mdで追加を確認して終了してください。各シェル呼び出しは単一の非対話コマンドにしてください。'
 ```
 
-Auto起動の表示は `jev-auto auto; audit: ...`。**起動ごとにログ保存先が変わる**ので、Bの `JEV_LOG_DIR` も更新する。
+Auto起動の表示は `jev-auto auto; audit: ...`。**起動ごとにログ保存先が変わる**。
 追加行と再読込結果を確認し、Jev判断とフックイベントが記録されていれば編集経路の追試成功。
 Jevに拒否された場合は、その拒否が記録されたことまでが確認結果であり、編集成功とは区別する。
 
@@ -185,18 +190,19 @@ Bashツールで pwd && pwd を1つのコマンドとして実行してくださ
 この拒否にJevは不要なので、対応する `judgments.jsonl` の行は増えない。
 Codexがツール呼び出し前に実行を見送った場合はフックの追試にはなっていない。
 
-### 8. 終了と記録（A/B）
+### 8. 終了と記録（A）
 
 AでCodexを終了する。中断したセッションでは以降の操作を許可しないため、再試行はランチャーから新しく起動する。
-Bの `tail` もCtrl-Cで終了し、Aでキーの環境変数を解除する。
+キーの環境変数を解除する。
 
 ```bash
 unset AI_GATEWAY_API_KEY
 ```
 
-調査用にBで次の情報を控えると再現しやすい。
+調査用に次の情報を控えると再現しやすい。`JEV_LOG_DIR` には起動時に表示された `audit:` のパスを指定する。
 
 ```bash
+JEV_LOG_DIR=/tmp/jev-auto-XXXXXX
 bun --version
 codex --version
 tail -n 20 "$JEV_LOG_DIR/audit.jsonl"
@@ -217,13 +223,15 @@ tail -n 5 "$JEV_LOG_DIR/judgments.jsonl"
 | `No SessionStart received ...` で約15秒後に終了 | プロジェクトの信頼設定、`/hooks` の信頼状態、フック定義内のBun/ソースの絶対パスを確認 |
 | `hook/broker unavailable` | 通常の `codex` ではなく `bun run start run ...` で起動したか確認。手順2の信頼設定時だけなら想定内 |
 | `SessionStart` はあるが `PreToolUse` がない | ツールを実行する依頼だったか確認。文章だけの応答やフック対象外経路では実行前イベントは出ない |
-| `judgments.jsonl` がない | `cat README.md` などJev対象操作を依頼したか確認。静的拒否や `pwd` では作られない |
-| `Jev rejected or evaluation unavailable` | 正常なリスク拒否と通信・回答形式エラーが同じ文言になる。判定ログの有無と `bun run test:jev` の結果で切り分ける |
+| `judgments.jsonl` が空 | `cat README.md` などJev対象操作を依頼したか確認。静的拒否や `pwd` では評価行が増えない |
+| `Jev rejected` | 後続の項目名・確率・閾値を確認する。同じ操作を繰り返さず、依頼と判定条件を調査する |
+| `evaluation unavailable` | 括弧内とログの `error` を確認。`timeout`、`http-401` 等、`invalid-answer`、`invalid-cost`、`provider-error` に分類する |
+| `repeated-tool-denial` | 静的拒否も含めてツールが連続3回拒否された。セッションは停止するため原因を解消して起動し直す |
 | `test:jev` で401/403 | キーと対象チーム、AI Gatewayの有料クレジットを確認。Pro契約だけでは通らなかった既存検証結果は `docs/REPORT.md` に記載 |
 | `jev-circuit-open` / 予算超過 / 中断後の拒否 | セッションの停止条件。原因を解消し、ランチャーを新しく起動する |
 | `EPERM ... broker.sock` / 汎用の起動エラー | Unixソケットを作れる環境か確認。起動前エラーの詳細は現状CLIで省略されるため、`bun test` の結合テストも確認 |
 
-詳細なHTTPエラー・判定遅延は現在のAuto Mode監査ログには記録しない。
+HTTPステータスと判定所要時間は記録するが、プロバイダーの生エラー本文・リクエスト本文は記録しない。
 broker到達前の失敗、改変検知後の拒否、一部の中断・終了経路もすべて監査ログに残るわけではない。
 ログがないことだけを理由に「安全に許可された」とは判断しない。
 
@@ -241,12 +249,14 @@ broker到達前の失敗、改変検知後の拒否、一部の中断・終了�
 - Jevの通信失敗・4秒のtimeout・欠けた回答・不正な確率・課金メタデータ欠落はAutoで拒否。2連続障害でそのセッションを停止する。
 - `Stop` は観測済みのツール結果とJev判断を使う。新たな結果がない、完了している、安全な次手が不明なら継続しない。
 - 継続は最大8回/ユーザー依頼、20回/セッション。最大30分、300ツール、500判定。新しい依頼・compaction・resumeでセッション全体の予算をリセットしない。
-- patchは試行ベースで累積50パス/3,000変更行。同一失敗3回で停止。スクリプト内部のファイル変更量まで検査する仕組みではない。
+- patchは試行ベースで累積50パス/3,000変更行。実行後の同一失敗3回、または実行前の連続拒否3回で停止。許可された呼び出しで連続拒否数をリセットする。静的拒否もツール予算へ計上する。スクリプト内部のファイル変更量まで検査する仕組みではない。
 - 観測課金額の上限は$0.05。リクエスト前に$0.001を予約し、課金情報が得られなければ予約を保持する。送信済みリクエストや価格変更まで含めた請求のハード上限ではない。
 - 中断・終了後は許可しない。再開は新しいランチャー起動から行う。
 
 予算と仮置きの確率閾値は `src/policy.ts` で定義する。リポジトリ内の任意設定で権限を拡大しない。
 確率閾値は安全性の証明ではなく、今後の実測で校正する値。
+読み取りの評価質問は、仮想的な危険ではなく具体的な証拠とユーザーの許可に基づくよう修正済み。
+閾値は据え置き。今回の環境にはGatewayキーがなく、この質問変更によって実Jevがsmoke testを許可するかは未検証。
 
 ## 監査と保証範囲
 
