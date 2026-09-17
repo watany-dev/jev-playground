@@ -24,6 +24,7 @@ jev-auto/
     REPORT.md           既存のJev接続検証結果
   scripts/
     run-jev.mjs          Gateway経由の接続検証
+    grill-jev.ts        仕様への質問をJevに答えさせる（gril-jevスキル用）
   src/
     cli.ts              init / run / hook
     config.ts           Codex設定と子プロセス環境
@@ -58,7 +59,7 @@ bun test
 `bun test` はローカルのUnixソケットを作るため、`EPERM ... listen` が出たらソケット作成を許可した環境で再実行する。
 ここまでのコマンドは有料APIを呼ばない。
 
-`check` はTypeScriptの型検査後、Bun向けにCLIと接続スクリプトをビルドする。
+`check` はTypeScriptの型検査後、Bun向けにCLIと接続スクリプト、grillランナーをビルドする。
 生成物は `.check/` に置き、API呼び出しは行わない。
 依存を変更したときは `bun install` で `bun.lock` を更新する。
 [Bunのlockfile仕様](https://bun.sh/docs/pm/lockfile) に従い、npmのlockfileは併用しない。
@@ -331,6 +332,23 @@ unset AI_GATEWAY_API_KEY
 
 キー未設定なら通信前に終了する。キーはファイルに保存しない。
 モデルは `typesafe-ai/jev`、プロバイダーは `typesafe-ai` に限定する。
+
+## 仕様をJevに詰めさせる（grill）
+
+Auto Modeとは別に、仕様・設計の決定をJevへ問うランナーを置いている。質問はClaudeが書き、
+回答はJevが返し、結果はADR（`../docs/adr/`）へ残す。手順は
+[gril-jevスキル](../.claude/skills/gril-jev/SKILL.md)に従う。
+
+```bash
+bun run grill <grill.json> --dry-run                 # 検証のみ。APIを呼ばない
+bun run grill <grill.json> --out <result.json>       # 有料リクエストを1回送る
+```
+
+質問ファイルの形式は `../.claude/skills/gril-jev/reference/example-grill.json` を参照する。
+1回あたり最大12問、stateはマスク後20,000文字まで、timeoutは30秒、リトライはしない。
+回答は確率であり、閾値（boolean 0.85 / choice 0.6・差0.2 / score 0.5）に届かない項目は
+`undecided` として返る。これは正しさの証明ではなく、ADRへ未決として残すための区別。
+このランナーはフックを通らず、監査ログも生成しない。
 
 ## 開発方針
 

@@ -12,8 +12,9 @@
     "start": "bun run src/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "check": "bun run typecheck && bun build src/cli.ts scripts/run-jev.mjs --target=bun --outdir=.check",
-    "test:jev": "bun run scripts/run-jev.mjs"
+    "check": "bun run typecheck && bun build src/cli.ts scripts/run-jev.mjs scripts/grill-jev.ts --target=bun --outdir=.check",
+    "test:jev": "bun run scripts/run-jev.mjs",
+    "grill": "bun run scripts/grill-jev.ts"
   },
   "dependencies": {
     "ai": "7.0.105",
