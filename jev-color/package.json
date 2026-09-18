@@ -1,0 +1,23 @@
+{
+  "name": "jev-color",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "description": "255択のchoiceを1リクエストで投げ、255個の確率をまるごと色として見るJevサンプル",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "test": "bun test",
+    "demo": "bun run scripts/stub-server.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun test"
+  },
+  "dependencies": {
+    "ai": "7.0.105",
+    "@ai-sdk/gateway": "4.0.85"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
+  }
+}
