@@ -10,5 +10,6 @@ JevをCodexのhooksへ接続するAuto Modeの実装と検証用リポジトリ�
 - [47都道府県あてフォーム (Python/uv)](jev-form/README.md) — Jevの確率分布をそのまま見るサンプル
 - [記事: Jevの確率分布をそのまま見る](jev-form/blog/guessing-prefectures-with-jev.md)
 - [255色でJevに文章を塗らせる (TypeScript/Bun)](jev-color/README.md) — choiceの上限255個を1リクエストで投げ、分布をまるごと色にする
+- [記事: choiceの上限255個まで使って文章を色に塗らせる](jev-color/blog/painting-sentences-with-255-colors.md)
 
 ログは起動時の `audit:` に表示されたディレクトリで確認する。保存先は起動ごとに変わるため、shadowからautoへの切り替え時も選び直す。

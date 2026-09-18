@@ -5,7 +5,8 @@
 argmax だけでなく分布のまま見るサンプル（TypeScript / Bun / AI SDK）。
 
 `jev-form` が47択で「分布の読み方」を見せるのに対し、こちらは上限まで候補を増やしたときに
-分布がどう振る舞うかを主題にする。設計の意図は [docs/DESIGN.md](docs/DESIGN.md)。
+分布がどう振る舞うかを主題にする。設計の意図は [docs/DESIGN.md](docs/DESIGN.md)、
+実装の解説は [blog/painting-sentences-with-255-colors.md](blog/painting-sentences-with-255-colors.md) を参照。
 
 ## 1. 何が出るか
 
@@ -40,7 +41,8 @@ Jev は有料クレジットのある Gateway アカウントでのみ実行で�
 
 環境変数: `JEV_COLOR_HOST`（既定 `127.0.0.1`）、`JEV_COLOR_PORT`（既定 `8787`）。
 
-1回あたり入力約4,200トークン（255色の criteria が大半）、Gateway 計上額はおよそ $0.0002。
+送信する質問のJSONは約6.7KB で、その大半が255色の criteria である。入力トークンはこれに比例する
+（掲載価格 $0.04 / 1Mトークンから見積もると1回あたり $0.0002 前後。実接続での実測はまだ行っていない）。
 
 ### キー無しで画面だけ見る
 
